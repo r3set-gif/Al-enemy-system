@@ -1,28 +1,37 @@
+-- SERVICES --
 local PFS = game:GetService("PathfindingService")
+-- REFERENCES --
 local Enemy = workspace:WaitForChild("Policeman")
 local EnemyHRP = Enemy:WaitForChild("HumanoidRootPart")
 local BuildingZone = workspace:WaitForChild("Patrol Zone")
+-- AI STATE VARIABLES --
 local State = "Patrol"
+local TargetPlayer = nil
+-- DISTANCE CHECKING VARIABLES --
 local DETECTION_RADIUS = 55
 local ALERT_RADIUS = 60
+-- ALERT VARIABLES --
 local ALERT_COUNT = 2
 local ALERT_COOLDOWN_TIME = 3
 local ALERT_VIEW_ANGLE = 140
 local SWEEP_ANGLE = ALERT_VIEW_ANGLE / 2
+-- ATTACK VARAIBLES --
 local ATTACK_RANGE = 4
 local ATTACK_COOLDOWN = 1
 local ATTACK_DAMAGE = 10
 local ALERT_TRIES = 0
 local AlertCooldown = 0
 local lastAttack = 0
-local TargetPlayer = nil
+-- PATROLLING BOUNDS --
 local SizeX = BuildingZone.Size.X / 2
 local SizeZ = BuildingZone.Size.Z / 2
 local MiniX = BuildingZone.Position.X - SizeX
 local MaxiX = BuildingZone.Position.X + SizeX
 local MiniZ = BuildingZone.Position.Z - SizeZ
 local MaxiZ = BuildingZone.Position.Z + SizeZ
-local function LineOfSight(plr)
+-->> FUNCTIONS
+-- VISION SYSTEM
+local function LineOfSight(plr) -- Uses RayCast to detect if player is in line of sight. A boolean function returns false or true.
 	local char = plr.Character
 	if not char then return false end
 	local playerHRP = char:FindFirstChild("HumanoidRootPart")
@@ -35,7 +44,7 @@ local function LineOfSight(plr)
 	if not result then return true end
 	return result.Instance:IsDescendantOf(char)
 end
-local function InViewAngle(plr)
+local function InViewAngle(plr) -- Creates a dot product between npc forward direction and direction(Cone shaped radius) to player if player is in view then it returns true else false
 	local char = plr.Character
 	if not char then return false end
 	local plrHRP = char:FindFirstChild("HumanoidRootPart")
@@ -45,12 +54,12 @@ local function InViewAngle(plr)
 	local dot = npcLookDir:Dot(dirToPlayer)
 	return dot >= math.cos(math.rad(SWEEP_ANGLE))
 end
-local function GetPatrolPoint()
+local function GetPatrolPoint() -- Calculated random patrol point used by main function Patrol()
 	local randomX = MiniX + math.random() * (MaxiX - MiniX)
 	local randomZ = MiniZ + math.random() * (MaxiZ - MiniZ)
 	return Vector3.new(randomX, EnemyHRP.Position.Y, randomZ)
 end
-local function GetClosestPlayer()
+local function GetClosestPlayer() -- Loops around players to find the closet one using magnitude then returns the distance and the player
 	local closestPlayer, closestDist = nil, math.huge
 	for _, plr in ipairs(game.Players:GetPlayers()) do
 		local char = plr.Character
@@ -65,8 +74,8 @@ local function GetClosestPlayer()
 	end
 	return closestPlayer, closestDist
 end
-local function Chase(plr)
-	print("Chasing")
+local function Chase(plr) -- Main Chase function Runs only when State == "Chase" 
+	print("Chasing") -- This function runs when player is in DETECTION_RADIUS 
 	if not plr or not plr.Character then
 		State = "Patrol"
 		TargetPlayer = nil
@@ -82,8 +91,8 @@ local function Chase(plr)
 	local attempts = 0
 	local path
 	repeat
-		attempts += 1
-		path = PFS:CreatePath()
+		attempts += 1 -- It retries max 10 times to get to player 
+		path = PFS:CreatePath() -- Creating paths to the player 
 		pcall(function()
 			path:ComputeAsync(EnemyHRP.Position, HRP.Position)
 		end)
@@ -92,7 +101,7 @@ local function Chase(plr)
 	for _, wp in ipairs(path:GetWaypoints()) do
 		if State ~= "Chase" then break end
 		local dist = (HRP.Position - EnemyHRP.Position).Magnitude
-		local canSee = InViewAngle(plr) and LineOfSight(plr)
+		local canSee = InViewAngle(plr) and LineOfSight(plr) -- Constantly checks if the player is in the vision system
 		if dist > DETECTION_RADIUS or not canSee then
 			State = "Patrol"
 			TargetPlayer = nil
@@ -101,28 +110,28 @@ local function Chase(plr)
 		if wp.Action == Enum.PathWaypointAction.Jump then
 			Enemy.Humanoid.Jump = true
 		end
-		if dist <= ATTACK_RANGE and tick() - lastAttack >= ATTACK_COOLDOWN then
+		if dist <= ATTACK_RANGE and tick() - lastAttack >= ATTACK_COOLDOWN then -- If its in the ATTACK_RANGE then it attacks the player
 			lastAttack = tick()
-			humanoid:TakeDamage(ATTACK_DAMAGE)
+			humanoid:TakeDamage(ATTACK_DAMAGE) 
 		end
 		Enemy.Humanoid:MoveTo(wp.Position)
 		Enemy.Humanoid.MoveToFinished:Wait()
 	end
 end
-local function Patrol()
+local function Patrol() -- Main Patrol function Runs when State == "Patrol"
 	print("Patroling")
 	local attempts = 0
 	local path
 	repeat
-		attempts += 1
+		attempts += 1 -- Also added max 10 attempts to avoid overload
 		path = PFS:CreatePath()
-		pcall(function()
+		pcall(function() -- Gets a random point in the Patrol Zone and computes a path
 			path:ComputeAsync(EnemyHRP.Position, GetPatrolPoint())
 		end)
 	until path.Status == Enum.PathStatus.Success or attempts > 10
 	if attempts > 10 then return end
 
-	for _, wp in ipairs(path:GetWaypoints()) do
+	for _, wp in ipairs(path:GetWaypoints()) do -- NPC moving towards that point
 		if State ~= "Patrol" then break end
 		if wp.Action == Enum.PathWaypointAction.Jump then
 			Enemy.Humanoid.Jump = true
@@ -130,14 +139,14 @@ local function Patrol()
 		Enemy.Humanoid:MoveTo(wp.Position)
 		Enemy.Humanoid.MoveToFinished:Wait()
 	end
-	task.wait(math.random(1, 3))
+	task.wait(math.random(1, 3)) -- Waiting time for natural feel 
 end
-local function Alert()
+local function Alert() -- Runs when State == "Alert". When player is in ALERT_RADIUS.
 	local hrp = EnemyHRP
 	local base = hrp.CFrame
 	local stepTime = 0.05
 	local stepAngle = 2
-	for dir = -SWEEP_ANGLE, SWEEP_ANGLE, stepAngle do
+	for dir = -SWEEP_ANGLE, SWEEP_ANGLE, stepAngle do -- Rotates right
 		if State ~= "Alert" then break end
 		hrp.CFrame = base * CFrame.Angles(0, math.rad(dir), 0)
 		local plr, dist = GetClosestPlayer()
@@ -149,7 +158,7 @@ local function Alert()
 		task.wait(stepTime)
 	end
 
-	for dir = SWEEP_ANGLE, -SWEEP_ANGLE, -stepAngle do
+	for dir = SWEEP_ANGLE, -SWEEP_ANGLE, -stepAngle do -- Rotates left
 		if State ~= "Alert" then break end
 		hrp.CFrame = base * CFrame.Angles(0, math.rad(dir), 0)
 		local plr, dist = GetClosestPlayer()
@@ -162,8 +171,9 @@ local function Alert()
 	end
 	AlertCooldown = ALERT_COOLDOWN_TIME
 end
-task.spawn(function()
-	while true do
+--<< LOOPS
+task.spawn(function()  -- STATE CONTROLLER LOOP 
+	while true do -- Using closetplayer and tracks its movement and states and once player is out of reach it changes states depending on radius
 		local plr, dist = GetClosestPlayer()
 		if AlertCooldown > 0 then
 			AlertCooldown -= 0.1
@@ -189,14 +199,14 @@ task.spawn(function()
 		task.wait(0.01)
 	end
 end)
-task.spawn(function()
-	while true do
+task.spawn(function() -- BEHAVIOUR EXECUTOR LOOP
+	while true do -- Constantly checks for changing states and calls the corresponding function 
 		if State == "Patrol" then
 			Patrol()
 		elseif State == "Chase" then
 			Chase(TargetPlayer)
 		elseif State == "Alert" then
-			if ALERT_TRIES >= ALERT_COUNT then
+			if ALERT_TRIES >= ALERT_COUNT then -- Did a cooldown on alert to naturally go and not stay stuck if the player stands still
 				ALERT_TRIES = 0
 				ALERT_RADIUS = 0
 				State = "Patrol"
