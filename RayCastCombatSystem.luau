@@ -105,7 +105,7 @@ RunService.Heartbeat:Connect(function() -- Recieves requests from ActiveCombos t
 				animator:LoadAnimation(ComboSettings[combo].KnockBackAnim):Play()
 				local BV = ApplyVelocity(char,combo) -- This is the body velocity used to apply a knockback effect
 				if not BV then print("BodyVelocity failed to fetch") continue end
-				Debris:AddItem(BV, 0.2)
+				Debris:AddItem(BV, 0.1)
 				local soundItem = GetFromPool(combo, "Sound") -- Using the helper function, a sound is gotten from the sound pool
 				if soundItem then -- After we get it we customise its properties and parent it to the model
 					local sound = soundItem.Obj
