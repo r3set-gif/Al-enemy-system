@@ -130,7 +130,7 @@ local function applyVelocity(character, combo:string)
 
 	local bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.MaxForce = Vector3.new(5e4, 0, 5e4)
-	bodyVelocity.Velocity = root.CFrame.LookVector * ComboSettings[combo].VelocityStrength -- VelocityStrength is used to determine the strength of the knockback
+	bodyVelocity.Velocity = root.CFrame.LookVector * ComboSettings[combo].VelocityStrength 
 	bodyVelocity.Parent = root
 
 	return bodyVelocity
