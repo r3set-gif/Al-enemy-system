@@ -19,15 +19,15 @@ local ComboAttachments = {}
 local ComboSettings = { 
 	-- Each combo has its own settings
 	Combo1 = {
-		VelocityStrength = 10, -- Strength of the body velocity on char and enemy for a knockback effect
-		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, -- Custom VFX for each combo (Pooled)
-		Sound = script["Hit Sound"], -- Custom Sound for each combo (Pooled)
-		KnockBackAnim = script.Anims.Combo1KnockBack, -- The animation to play on the enemy for a knockback effect
-		HitLength = 4, -- Used to determine the length of the hit window/rays
-		Damage = 5, -- How much damage that combo does
-		AttachmentCount = 1, -- The number of attachments to use for the combo x2 its setting up the placement for the rays
-		Pool = { VFX = {}, Sound = {} } -- Pools for VFX and Sound to avoid memory spikes
-	}, -- I used a Nested table for the pool because pools are combo-related every combo has its own vfx and sound
+		VelocityStrength = 10, 
+		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, 
+		Sound = script["Hit Sound"],
+		KnockBackAnim = script.Anims.Combo1KnockBack,
+		HitLength = 4, 
+		Damage = 5,
+		AttachmentCount = 1,
+		Pool = { VFX = {}, Sound = {} } 
+	},
 	Combo2 = {
 		VelocityStrength = 20,
 		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, -- Combo1 and 2 VFX and Sound are the same but they are just placeholders
