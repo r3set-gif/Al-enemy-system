@@ -10,14 +10,14 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- Receives client combo requests for server-side validation
 local catchHitRequests = ReplicatedStorage.Remotes.CallServer
---[[ Tables for combat data:
+
+--[[ 1. Tables for combat data:
    ActiveCombos: stores hit 'notes' from players
    ComboSettings: settings per combo
    ComboAttachments: attachments for raycasting ]]
 local activeCombos = {}
 local ComboAttachments = {} 
 local ComboSettings = { 
-	-- Each combo has its own settings
 	Combo1 = {
 		VelocityStrength = 10, 
 		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, 
@@ -30,7 +30,7 @@ local ComboSettings = {
 	},
 	Combo2 = {
 		VelocityStrength = 20,
-		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, -- Combo1 and 2 VFX and Sound are the same but they are just placeholders
+		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, 
 		Sound = script["Hit Sound"],
 		KnockBackAnim = script.Anims.Combo2KnockBack,
 		HitLength = 5,
@@ -79,22 +79,18 @@ end
 local function getFromPool(comboName:string, poolType:string)
 	local combo = ComboSettings[comboName] 
 	local pool = combo and combo.Pool[poolType]
-
 	if not pool then
 		return
 	end
-
 	for _, item in ipairs(pool) do
 		if not item.InUse then 
 			item.InUse = true
 			return item
 		end
 	end
-
 	local newItem = createPoolItem(combo[poolType]) 
 	newItem.InUse = true
 	table.insert(pool, newItem)
-
 	return newItem
 end
 --[[ 4. CreatePoolItemOnPlayerAdded : Loop
@@ -123,16 +119,13 @@ end
 ]]
 local function applyVelocity(character, combo:string)
 	local root = character:FindFirstChild("HumanoidRootPart")
-
 	if not root then
 		return
 	end
-
 	local bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.MaxForce = Vector3.new(5e4, 0, 5e4)
 	bodyVelocity.Velocity = root.CFrame.LookVector * ComboSettings[combo].VelocityStrength 
 	bodyVelocity.Parent = root
-
 	return bodyVelocity
 end
 --[[ 6. AddKnockback : Action
@@ -148,9 +141,7 @@ local function addKnockback(humanoid:Humanoid, character, combo:string)
 		animator = Instance.new("Animator")
 		animator.Parent = humanoid
 	end
-
 	animator:LoadAnimation(ComboSettings[combo].KnockBackAnim):Play()
-
 	local bodyVelocity = applyVelocity(character, combo) 
 	if not bodyVelocity then
 		print("BodyVelocity failed to fetch")
@@ -183,7 +174,6 @@ local function addHitRequest(player, character, combo:string)
 	local params = RaycastParams.new() 
 	params.FilterDescendantsInstances = { character } 
 	params.FilterType = Enum.RaycastFilterType.Exclude
-
 	local notes = { 
 		Player = player,
 		Char = character,
@@ -194,7 +184,7 @@ local function addHitRequest(player, character, combo:string)
 		Duration = 0.35,
 		RaycastParams = params,
 	}
-	table.insert(activeCombos, notes) -- We store the note in the ActiveCombos table
+	table.insert(activeCombos, notes) 
 end
 --[[ 8. IsHitValid : Boolean
     Determines whether a hit is still valid based on timing and processing state.
@@ -233,22 +223,18 @@ local function noteValidity(note)
 		local combo = note.Combo
 		local hitCache = note.HitCache
 		local raycastParams = note.RaycastParams
-		
 		if not char or not combo or not hitCache or not raycastParams then
 			print("Invalid combo note: missing data")
 			return nil
 		end
-
 		local root = char:FindFirstChild("HumanoidRootPart")
 		if not root then
 			return nil
 		end
-
 		local attachments = ComboAttachments[char] and ComboAttachments[char][combo]
 		if not attachments then
 			return nil
 		end
-
 		return char, combo, hitCache, raycastParams, attachments, root
 end
 --[[ 10. FetchAttachsTable : Table
@@ -293,34 +279,27 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 	local origin = attach.WorldPosition 
 	local direction = root.CFrame.LookVector * ComboSettings[combo].HitLength
 	local result = workspace:Raycast(origin, direction, raycastParams)
-
 	if not result then
 		return
 	end 
-
 	local model = result.Instance:FindFirstAncestorOfClass("Model") 
 	if not model or model == character then
 		return
 	end 
-
 	local hum = model:FindFirstChildOfClass("Humanoid") 
 	if not hum or hum.Health <= 0 then
 		return
 	end 
-
 	if hitCache[hum] then
 		return
 	end 
-
 	hitCache[hum] = true 
 	addKnockback(hum,character,combo)
-
 	local soundItem = getFromPool(combo, "Sound")
 	if soundItem then 
 		local sound = soundItem.Obj
 		sound.Parent = model.HumanoidRootPart 
 		sound:Play()
-
 		task.delay(2, function() 
 			sound:Stop()
 			sound.Parent = nil
@@ -334,13 +313,11 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 	if vfxItem then
 		local vfx = vfxItem.Obj
 		vfx.Parent = model.HumanoidRootPart 
-
 		for _, p in ipairs(vfx:GetChildren()) do 
 			if p:IsA("ParticleEmitter") then
 				p:Emit(10)
 			end
 		end
-
 		task.delay(0.6, function()
 			vfx.Parent = nil 
 			vfxItem.InUse = false
@@ -484,7 +461,6 @@ Players.PlayerAdded:Connect(function(player)
 		else
 			createAttachments(char, leftPart, rightPart)
 		end
-		
 		task.spawn(createPoolItemOnPlayerAdded)
 	end)
 end)
@@ -525,22 +501,19 @@ catchHitRequests.OnServerEvent:Connect(function(player, combo:string)
 	if not combo then
 		return
 	end 
-	
 	if not player then
 		return
 	end 
-	
 	local char = player.Character
 	if not char then
 		return
 	end
-
 	local hum = char:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then
 		return
 	end
-	addHitRequest(player,char,combo)
 
+	addHitRequest(player,char,combo)
 	local bodyVelocity = applyVelocity(char, combo)
 	Debris:AddItem(bodyVelocity, 0.1)
 end)
