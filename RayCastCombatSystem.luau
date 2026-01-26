@@ -117,14 +117,18 @@ end
     Note: In the future, this will be updated to use pooling and
     switched to LinearVelocity for better performance and control.
 ]]
-local function applyVelocity(character, combo:string)
+local function applyVelocity(character, combo:string, attacker)
 	local root = character:FindFirstChild("HumanoidRootPart")
-	if not root then
-		return
+	local attackerRoot = attacker and attacker:FindFirstChild("HumanoidRootPart")
+	local direction
+	if attackerRoot then
+		direction = attackerRoot.CFrame.LookVector
+	else
+		direction = root.CFrame.LookVector
 	end
 	local bodyVelocity = Instance.new("BodyVelocity")
 	bodyVelocity.MaxForce = Vector3.new(5e4, 0, 5e4)
-	bodyVelocity.Velocity = root.CFrame.LookVector * ComboSettings[combo].VelocityStrength 
+	bodyVelocity.Velocity = direction * ComboSettings[combo].VelocityStrength
 	bodyVelocity.Parent = root
 	return bodyVelocity
 end
@@ -135,14 +139,14 @@ end
     Different combos can have varying knockback strength and animations to make 
     attacks feel distinct.
 ]]
-local function addKnockback(humanoid:Humanoid, character, combo:string)
+local function addKnockback(humanoid:Humanoid, character, combo:string, player)
 	local animator = humanoid:FindFirstChildOfClass("Animator") 
 	if not animator then 
 		animator = Instance.new("Animator")
 		animator.Parent = humanoid
 	end
 	animator:LoadAnimation(ComboSettings[combo].KnockBackAnim):Play()
-	local bodyVelocity = applyVelocity(character, combo) 
+	local bodyVelocity = applyVelocity(character, combo,player) 
 	if not bodyVelocity then
 		print("BodyVelocity failed to fetch")
 		return
@@ -279,11 +283,16 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 	local origin = attach.WorldPosition 
 	local direction = root.CFrame.LookVector * ComboSettings[combo].HitLength
 	local result = workspace:Raycast(origin, direction, raycastParams)
+
 	if not result then
 		return
 	end 
 	local model = result.Instance:FindFirstAncestorOfClass("Model") 
 	if not model or model == character then
+		return
+	end 
+	local root = model:FindFirstChild("HumanoidRootPart") 
+	if not root then
 		return
 	end 
 	local hum = model:FindFirstChildOfClass("Humanoid") 
@@ -293,13 +302,16 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 	if hitCache[hum] then
 		return
 	end 
+
 	hitCache[hum] = true 
-	addKnockback(hum,model,combo)
+	addKnockback(hum,model,combo,character)
+
 	local soundItem = getFromPool(combo, "Sound")
 	if soundItem then 
 		local sound = soundItem.Obj
 		sound.Parent = model.HumanoidRootPart 
 		sound:Play()
+
 		task.delay(2, function() 
 			sound:Stop()
 			sound.Parent = nil
@@ -512,8 +524,8 @@ catchHitRequests.OnServerEvent:Connect(function(player, combo:string)
 	if not hum or hum.Health <= 0 then
 		return
 	end
-
 	addHitRequest(player,char,combo)
 	local bodyVelocity = applyVelocity(char, combo)
 	Debris:AddItem(bodyVelocity, 0.1)
 end)
+
