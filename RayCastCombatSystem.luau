@@ -294,7 +294,7 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 		return
 	end 
 	hitCache[hum] = true 
-	addKnockback(hum,character,combo)
+	addKnockback(hum,model,combo)
 	local soundItem = getFromPool(combo, "Sound")
 	if soundItem then 
 		local sound = soundItem.Obj
