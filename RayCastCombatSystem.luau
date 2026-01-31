@@ -1,20 +1,49 @@
- -- Raycast-based melee combat system with combo tuning, VFX, knockback, and pooling.
---[[ FRAMEWORK OVERVIEW (READ THIS BEFORE ANYTHING OR YOULL BE LOST)
-   Each hit request becomes a temporary 'note' table with combo, timing, and raycast data.
-   Hits use attachment-driven raycasts; each combo controls coverage and precision.
-   Notes are processed every Heartbeat for accurate hit detection over time.
+-- Raycast-based melee combat system with combo tuning, VFX, knockback, and pooling.
+--[[ FRAMEWORK OVERVIEW (READ THIS BEFORE ANYTHING OR YOU'LL BE LOST)
+     Hit requests are fired from the client. Each hit request is caught and
+     turned into a temporary 'note' table containing all the data needed to
+     execute a hit. Attachments are created in body parts of the player this is 
+     needed for ray detection attachments act like a guide so we can fetch its 
+     position and catch the rays from their. Notes are added into one global table
+     and processed by one global heartbeat loop.
 ]]
 local Debris = game:GetService("Debris")
 local RunService = game:GetService("RunService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
--- Receives client combo requests for server-side validation
+
 local catchHitRequests = ReplicatedStorage.Remotes.CallServer
 
---[[ 1. Tables for combat data:
-   ActiveCombos: stores hit 'notes' from players
-   ComboSettings: settings per combo
-   ComboAttachments: attachments for raycasting ]]
+-- 0.5 This is a extra check that the pool function is only ran once 
+-- avoiding multiple loops or uneeded instances
+local poolsCreated = false
+
+--[[ 1. Tables
+1.1 cacheTracks: is a table that holds references to animation tracks that
+    have already been loaded. This avoids repeatedly loading the same
+    animations, saving resources.
+
+1.2 activeCombos: is a table that holds all hit requests sent by every
+   player. It is essential for tracking hit requests. I made this table
+   player-shared for simplicity, so I don’t need nested loops or mulitple
+   loops running at the same time on every players hit requests table to 
+   access a specific player’s data. For scalability, it would be better 
+   to use per-player keys instead.
+
+1.3 ComboSettings: controls the customization of hits. It acts as a
+   “customization board” that lets me easily alter the feel of combat.
+   Placing it at the top of the script allows me to add new combos by
+   simply adding another entry, as long as the key matches the combo’s
+   name. To add a new entry mostly requires adding to local script
+   logic and just adding a new entry to the ComboSettings table.
+
+1.4 ComboAttachments holds all attachments made on a player’s rig. This
+    is a player-shared table that helps with easy tracking, avoiding the 
+    need to iterate over the player’s character repeatedly, and allows 
+    fast access to attachments.
+]]
+
+local cacheTracks = {}
 local activeCombos = {}
 local ComboAttachments = {} 
 local ComboSettings = { 
@@ -23,64 +52,92 @@ local ComboSettings = {
 		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, 
 		Sound = script["Hit Sound"],
 		KnockBackAnim = script.Anims.Combo1KnockBack,
-		HitLength = 4, 
+		HitLength = 3, 
 		Damage = 5,
 		AttachmentCount = 1,
 		Pool = { VFX = {}, Sound = {} } 
 	},
 	Combo2 = {
-		VelocityStrength = 20,
+		VelocityStrength = 15,
 		VFX = ReplicatedStorage.VFX.HitVFX.Attachment, 
 		Sound = script["Hit Sound"],
 		KnockBackAnim = script.Anims.Combo2KnockBack,
-		HitLength = 5,
+		HitLength = 4,
 		Damage = 7,
 		AttachmentCount = 1,
 		Pool = { VFX = {}, Sound = {} }
 	},
 	Combo3 = {
-		VelocityStrength = 30,
+		VelocityStrength = 20,
 		VFX = ReplicatedStorage.VFX["Full Impact"].Attachment,
 		Sound = script.SuperHit,
 		KnockBackAnim = script.Anims.Combo3KnockBack,
-		HitLength = 7,
+		HitLength = 5,
 		Damage = 10,
 		AttachmentCount = 2,
 		Pool = { VFX = {}, Sound = {} }
 	},
 }
---[[ 2. CreatePooledObjectItem : Table
-	Creates a new pool item for the specified instance type.
+--[[2. Pool System : Optimization
+The reason for creating a pool system was to reduce CPU spikes. Before
+the pool, the script would create a new VFX and sound for every hit,
+which was expensive and could hurt performance as more players joined.
+With the pool system, VFX and sound are pre-made and reused, causing
+only a minor spike at the start instead of repeated spikes throughout
+the game.
 
-	This function is only called when all existing pool items are in use
-	and a new one must be created. This is a rare case, but without this
-	function, the system would be more likely to break under heavy load.
+2.1 POOL_INCREMENT
+This determines how many instances are pre-made when a player joins.
+It is set to 6, so 6 instances are created per player join and 6 are
+removed when a player leaves. More players = bigger pool. VFX and
+sounds are custom per combo, which makes the structure nested.
 
-	Object pooling is used because repeatedly creating and destroying
-	instances at runtime is expensive and can cause spikes in CPU and
-	memory usage.
+2.2 createPoolItem -- Creates emergency instances if pool is unavailable
+A helper function that creates a new instance of a VFX or sound.
+Each instance has an InUse flag so that, in rare cases where all
+instances are being used, a new one can be created. Simply pass the
+type of instance you need, and it returns a new one.
+
+2.3 getFromPool -- Helps Access the pool
+This retrieves an instance from the pool. It handles checking for
+availability and creating a new instance if needed. It acts as the
+main pool management function.
+
+2.4 createPools -- Handles premaking instances in the pool
+This loops through all combos and pre-makes instances when a player
+joins. It ensures the pool is ready and not empty, so items are
+instantly available when needed.
+
+2.5 decreasePoolSize -- Handles Pool Cleanup 
+The inverse of createPools, this reduces pool size when a player
+leaves. This prevents excessive memory usage and potential lag from
+keeping unused instances around.
+
+The nested logic in decreasePoolSize and createPools exists because
+each combo has its own sound and VFX, and the pools are stored inside
+ComboSettings. This makes loops multi-level and harder to read.
+
+For future improvements, it would be better to store pools in a separate
+table, outside of ComboSettings. This would reduce nesting and improve
+the readability and maintainability of the script.
 ]]
+local POOL_INCREMENT = 6 
 local function createPoolItem(instance:Instance) 
 	return {
 		Obj = instance:Clone(),
 		InUse = false,
 	}
 end
---[[ 3. GetFromPool : Instance
-    Attempts to retrieve a pool item from the specified pool.
-
-    This function is called when a hit is registered and we need VFX or
-    sound for aesthetic purposes. It takes two parameters: the combo
-    name (e.g., Combo1, Combo2) and the pool type (VFX or Sound).
-    
-    It handles retrieving a pool item, tracking it and making a new one if
-    there isnt one available.
-]]
 local function getFromPool(comboName:string, poolType:string)
 	local combo = ComboSettings[comboName] 
+	if not combo then
+		warn("Invalid combo:", comboName)
+		return nil
+	end
 	local pool = combo and combo.Pool[poolType]
 	if not pool then
-		return
+		warn("Invalid pool type:", poolType, "for", comboName)
+		return nil
 	end
 	for _, item in ipairs(pool) do
 		if not item.InUse then 
@@ -93,88 +150,149 @@ local function getFromPool(comboName:string, poolType:string)
 	table.insert(pool, newItem)
 	return newItem
 end
---[[ 4. CreatePoolItemOnPlayerAdded : Loop
-    Pre-populates the ComboSettings pools with VFX and Sound objects when 
-    a player joins. 
-    
-    Each combo gets a default of 6 objects (VFX and Sounds) 
-    to handle typical combat situations. This ensures that the pool isn’t 
-    empty and reduces runtime spikes when combos are used.
-]]
-local function createPoolItemOnPlayerAdded()
+local function createPools()
+	if poolsCreated then
+		return
+	end
 	for _, combo in pairs(ComboSettings) do 
 		for poolType, pool in pairs(combo.Pool) do
-			for i = 1, 6 do
+			for i = 1, POOL_INCREMENT do
 				table.insert(pool, createPoolItem(combo[poolType])) 
 			end
 		end
 	end
 end
---[[ 5. ApplyVelocity : BodyVelocity
-    Applies a knockback or push effect to the specified character by
-    creating a BodyVelocity instance.
-    
-    Note: In the future, this will be updated to use pooling and
-    switched to LinearVelocity for better performance and control.
-]]
-local function applyVelocity(character, combo:string, attacker)
-	local root = character:FindFirstChild("HumanoidRootPart")
-	local attackerRoot = attacker and attacker:FindFirstChild("HumanoidRootPart")
-	local direction
-	if attackerRoot then
-		direction = attackerRoot.CFrame.LookVector
-	else
-		direction = root.CFrame.LookVector
+local function decreasePoolSize()
+	for _, combo in pairs(ComboSettings) do
+		for poolType, pool in pairs(combo.Pool) do
+			local removed = 0
+			for i = #pool, 1, -1 do
+				local item = pool[i]
+				if not item.InUse then
+					table.remove(pool, i)
+					if item.Obj then
+						Debris:AddItem(item.Obj, 0.1)
+					end
+					removed += 1
+					if removed >= POOL_INCREMENT then
+						break 
+					end
+				end
+			end
+		end
 	end
-	local bodyVelocity = Instance.new("BodyVelocity")
-	bodyVelocity.MaxForce = Vector3.new(5e4, 0, 5e4)
-	bodyVelocity.Velocity = direction * ComboSettings[combo].VelocityStrength
-	bodyVelocity.Parent = root
-	return bodyVelocity
 end
---[[ 6. AddKnockback : Action
-    Adds knockback to the specified character when hit.
-    Plays a knockback animation and applies a BodyVelocity to push the enemy back.
-    Ensures an Animator exists on the humanoid so the animation can play properly.
-    Different combos can have varying knockback strength and animations to make 
-    attacks feel distinct.
+--[[3. Impact and Knockback Effects : Visuals
+These features are used to add a more realistic feel to combat.
+LinearVelocity is used to create a visual effect when a player hits
+another player. Even a small hit applies a subtle push, giving the
+sense of stepping forward or impact.
+
+3.1 applyVelocity – Creates a LinearVelocity instance and applies
+it for 0.1 seconds. 
+The strength of the velocity is controlled by ComboSettings, 
+so stronger combos produce stronger impacts, while lighter 
+hits feel smaller, mimicking real-world combat physics.
+
+Each player has only one velocity instance created, which is reused
+via the Enabled property. This reduces memory usage by avoiding
+repeated creation and destruction of instances. The function handles
+both small step-forward pushes and knockback effects. The attacker
+parameter determines the direction of the velocity.
+
+3.2 addKnockback – Handles the knockback animation and velocity.
+This is called after a hit is registered and the sound is played.
+Animations are loaded only once for optimization, and it reuses
+applyVelocity to push the opponent back appropriately.
 ]]
+local function applyVelocity(character, combo, attacker)
+	if not character then 
+		return
+	end
+
+	local comboData = ComboSettings[combo]
+	if not comboData or not comboData.VelocityStrength then 
+		return 
+	end
+
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then 
+		return 
+	end
+
+	local velocityAttachment = root:FindFirstChild("VelocityAttachment")
+	if not velocityAttachment then
+		velocityAttachment = Instance.new("Attachment")
+		velocityAttachment.Name = "VelocityAttachment"
+		velocityAttachment.Parent = root
+	end
+
+	local linearVelocity = root:FindFirstChild("KnockbackVelocity")
+	if not linearVelocity then
+		linearVelocity = Instance.new("LinearVelocity")
+		linearVelocity.Name = "KnockbackVelocity"
+		linearVelocity.Attachment0 = velocityAttachment
+		linearVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+		linearVelocity.MaxForce = math.huge
+		linearVelocity.Parent = root
+	end
+
+	local direction = root.CFrame.LookVector
+	if attacker then
+		local attackerRoot = attacker:FindFirstChild("HumanoidRootPart")
+		if attackerRoot then
+			local diff = root.Position - attackerRoot.Position
+			if diff.Magnitude > 0 then
+				direction = diff.Unit
+			end
+		end
+	end
+
+	linearVelocity.VectorVelocity = direction * comboData.VelocityStrength
+	linearVelocity.Enabled = true
+
+	task.delay(0.1, function()
+		if linearVelocity then
+			linearVelocity.Enabled = false
+		end
+	end)
+end
 local function addKnockback(humanoid:Humanoid, character, combo:string, player)
 	local animator = humanoid:FindFirstChildOfClass("Animator") 
 	if not animator then 
 		animator = Instance.new("Animator")
 		animator.Parent = humanoid
 	end
-	animator:LoadAnimation(ComboSettings[combo].KnockBackAnim):Play()
-	local bodyVelocity = applyVelocity(character, combo,player) 
-	if not bodyVelocity then
-		print("BodyVelocity failed to fetch")
+	local anim = ComboSettings[combo].KnockBackAnim
+	if not anim then
 		return
 	end
-	Debris:AddItem(bodyVelocity, 0.1)
+	local track = cacheTracks[humanoid][combo]
+	if not track then
+		track = animator:LoadAnimation(anim)
+		cacheTracks[humanoid][combo] = track
+	end
+	track:Play()
+	applyVelocity(character, combo, player) 
 end 
---[[ 7. AddHitRequest : Action
-    Adds a combo note to the ActiveCombos table for processing.
-    
-    This function is called when a player triggers a hit request.
-    As explained in the framework section, each hit is converted
-    into a temporary "note" table that contains all data required
-    to process the combo over time.
+--[[4. Hit Creating Process 
+4.1 addHitRequest – Creates a note for the hit request and inserts
+it into activeCombos. This approach is easy to scale because different
+note types can be added in the future for special hits, and more
+properties can be added to each note. Functions can then be updated
+to process those new note types.
 
-    The note stores:
-    1. The player triggering the combo
-    2. The character performing the combo
-    3. The combo name being used
-    4. A hit cache to prevent double hits
-    5. A processed flag for cleanup
-    6. The time the note was created
-    7. The duration the note remains active
-    8. Preconfigured raycast parameters
-
-    Once created, the note is inserted into ActiveCombos and is
-    validated and processed every Heartbeat until it expires.
+Each note only exists in the table for a short time. If it remains too
+long, it becomes invalid (missed hit) or already processed. This is
+necessary because combat is fast, and the script executes hits quickly.
+Leaving notes in the table too long could result in repeated or
+duplicate hits, which would break the combat logic.
 ]]
 local function addHitRequest(player, character, combo:string)
+	if not ComboSettings[combo] then
+		warn("Rejected hit request: invalid combo", combo)
+		return
+	end
 	local params = RaycastParams.new() 
 	params.FilterDescendantsInstances = { character } 
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -190,21 +308,37 @@ local function addHitRequest(player, character, combo:string)
 	}
 	table.insert(activeCombos, notes) 
 end
---[[ 8. IsHitValid : Boolean
-    Determines whether a hit is still valid based on timing and processing state.
+--[[5. Hit Registering System
+5.1 isHitValid – Checks whether the note is still valid. Every note
+is tracked using an os.clock timer. This ensures that, regardless of
+circumstance, the note is removed after its duration expires. It’s safer
+for a note to expire than to linger, because lingering notes could
+cause repeated hits, crashes, or lag.
 
-    When a player triggers a hit, the remote event collects all the necessary
-    information—such as the player, character, combo type, and timing—into a
-    structured table called a "note". This note tracks the start time of the hit
-    and how long it is considered valid (the duration).  
+5.2 noteDataChecks – Verifies that the note contains all necessary
+data before execution. This is a second layer of security to prevent
+errors or undefined behavior. Without this check, the script could
+fail or behave unpredictably. Only valid notes are returned for
+processing.
 
-    This function checks if the note has already been processed or if the
-    hit has exceeded its valid window. If the hit has expired, it marks the
-    note as processed so that it can later be removed by RemoveNoteFromTable.
-    This prevents double hits, spam hits, and ensures that each attack is
-    only applied once during its intended timeframe.
+5.3 registerHit – Called once a note is valid. This is where the
+hit is executed for each attachment. Raycasts are performed for every
+attachment, and when a hit is detected, the function fetches VFX,
+sound, knockback effects from the pool, and applies damage. This is
+a heavy function, so for future improvements, you could separate VFX,
+sound, and knockback logic for clarity and maintainability.
+
+5.4 processActiveNote – Coordinates the processing of a note. It
+checks the note via noteDataChecks and then executes it with
+registerHit. It also iterates through the player’s attachments to
+determine the correct positions for raycast detection. This is the
+central function that brings all the note processing together.
 ]]
 local function isHitValid(notes)
+	if notes.Processed then
+		return false
+	end
+	
 	if os.clock() - notes.StartTime > notes.Duration then 
 		notes.Processed = true
 		return false
@@ -212,74 +346,31 @@ local function isHitValid(notes)
 		return true
 	end
 end
---[[ 9. NoteValidity : Variables
-    Used to check if the note has valid indexes.
-    
-    This function is called before processing a note to ensure it has all the
-    required data. If any of the required data is missing, the function returns
-    nil, indicating that the note is invalid or expired. This prevents errors and weird hits.
-]]
-local function noteValidity(note)
+local function noteDataChecks(note)
 	if note.Processed or not isHitValid(note) then
-			return nil
-		end
-		local char = note.Char
-		local combo = note.Combo
-		local hitCache = note.HitCache
-		local raycastParams = note.RaycastParams
-		if not char or not combo or not hitCache or not raycastParams then
-			print("Invalid combo note: missing data")
-			return nil
-		end
-		local root = char:FindFirstChild("HumanoidRootPart")
-		if not root then
-			return nil
-		end
-		local attachments = ComboAttachments[char] and ComboAttachments[char][combo]
-		if not attachments then
-			return nil
-		end
-		return char, combo, hitCache, raycastParams, attachments, root
-end
---[[ 10. FetchAttachsTable : Table
-    Retrieves the attachment set for a specific character and combo.
-
-    This function is used to safely access the ComboAttachments table.
-    
-    Returning nil instead of indexing directly prevents runtime
-    errors when characters, combos, or attachments are missing.
-    This function acts as a small safety layer before hit processing.
-]]
-local function fetchAttachsTable(character, combo:string)
-	local charTable = ComboAttachments[character] 
-	if not charTable then
 		return nil
 	end
-	local set = charTable and charTable[combo] 
-	if not set then
+	local char = note.Char
+	local combo = note.Combo
+	local hitCache = note.HitCache
+	local raycastParams = note.RaycastParams
+	if not char or not combo or not hitCache or not raycastParams then
+		note.Processed = true
+		print("Invalid combo note: missing data")
 		return nil
 	end
-	return set
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		return nil
+	end
+	local attachments = ComboAttachments[char] and ComboAttachments[char][combo]
+	if not attachments then
+		return nil
+	end
+	return char, combo, hitCache, raycastParams, attachments, root
 end
---[[ 11. RegisterHit : Action
-    Performs hit detection and applies combat effects.
-
-    This function is called for each attachment during combo processing.
-    It raycasts forward from the attachment’s world position using the
-    character’s facing direction and the combo’s configured hit length.
-
-    If a valid humanoid target is detected and has not already been hit
-    by this combo note, the function:
-    - Registers the hit in the hit cache to prevent double hits
-    - Applies knockback and knockback animation
-    - Plays pooled sound and visual effects
-    - Deals damage based on the combo settings
-
-    This function represents the core hit-resolution logic of the
-    combat system, combining detection, feedback, and damage handling
-    in a single controlled execution path.
-]]
-local function registerHit(attach, character, combo:string, hitCache, raycastParams, attachments, root)
+local function registerHit(attach, character, combo:string, hitCache, 
+	raycastParams, attachments, root)
 	local origin = attach.WorldPosition 
 	local direction = root.CFrame.LookVector * ComboSettings[combo].HitLength
 	local result = workspace:Raycast(origin, direction, raycastParams)
@@ -300,22 +391,28 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 		return
 	end 
 	if hitCache[hum] then
-		return
+		if hum.Parent == nil then
+			hitCache[hum] = nil
+		else
+			return
+		end
 	end 
 
 	hitCache[hum] = true 
-	addKnockback(hum,model,combo,character)
+	addKnockback(hum, model, combo, character)
 
 	local soundItem = getFromPool(combo, "Sound")
 	if soundItem then 
 		local sound = soundItem.Obj
-		sound.Parent = model.HumanoidRootPart 
+		if sound.Parent ~= model.HumanoidRootPart then
+			sound.Parent = model.HumanoidRootPart 
+		end
 		sound:Play()
 
 		task.delay(2, function() 
 			sound:Stop()
-			sound.Parent = nil
 			soundItem.InUse = false
+			sound.Parent = nil
 		end)
 	else 
 		print("Sound Pool failed to fetch Combos Sound")
@@ -324,208 +421,192 @@ local function registerHit(attach, character, combo:string, hitCache, raycastPar
 	local vfxItem = getFromPool(combo, "VFX") 
 	if vfxItem then
 		local vfx = vfxItem.Obj
-		vfx.Parent = model.HumanoidRootPart 
+		if vfx.Parent ~= model.HumanoidRootPart then
+			vfx.Parent = model.HumanoidRootPart 
+		end
 		for _, p in ipairs(vfx:GetChildren()) do 
 			if p:IsA("ParticleEmitter") then
 				p:Emit(10)
 			end
 		end
 		task.delay(0.6, function()
-			vfx.Parent = nil 
 			vfxItem.InUse = false
+			vfx.Parent = nil 
 		end)
 	else
 		print("VFX Pool failed to fetch Combos VFX")
 	end
 	hum:TakeDamage(ComboSettings[combo].Damage) 
 end
-
---[[ 12. RemoveNoteFromTable : Cleanup
-    Cleans up processed combo notes or else if notes stay in the table 
-    they will continue to run hits over and over again which can crash.
-    Causing duplicate hits and spam hits.
-]]
-local function removeNoteFromTable(i) 
-	if activeCombos[i].Processed then
-		table.remove(activeCombos, i)
-	end
-end
---[[ 13. ProcessComboNote : Action
-    Processes a single combo note during the Heartbeat loop.
-
-    This function is called for each active note stored inthe ActiveCombos table. 
-    It first validates the note using NoteValidity to ensure all required data still 
-    exists and that the hit has not expired.
-
-    If the note is valid, the function fetches the attachment sets associated
-    with the character and combo, the calls registerHit for each attachment.
-]]
-local function processComboNote(note)
-	local char, combo, hitCache, raycastParams, attachments, root = noteValidity(note)
+local function processActiveNote(note)
+	local char, combo, hitCache, raycastParams, attachments, root = noteDataChecks(note)
 	if not char then
 		return
 	end
-	local set = fetchAttachsTable(char, combo)
-	if not set then
-		return
-	end
-	for _, handTable in pairs(set) do
+	for _, handTable in pairs(attachments) do
 		for _, attach in ipairs(handTable) do
 			registerHit(attach, char, combo, hitCache, raycastParams, attachments, root)
 		end
 	end
 end
---[[ 14. FindRigType : Body Parts
-    Determines the correct limb parts based on the character's rig type.
+--[[ 6. Attachment Creating Process
+This section explains how attachments are used to track positions for
+raycasts to detect hits. The system is flexible so it can support both
+R6 and R15 rigs, though R6-only could simplify things in the future.
 
-    Roblox characters can use either R6 or R15 rigs, which have different
-    limb naming conventions. This function checks the Humanoid's RigType
-    and returns the appropriate left and right limb parts accordingly.
+6.1 findRigType – Determines the rig type of a character. We need
+access to the left and right arms, but R6 and R15 rigs name these parts
+differently. This function stores references to the correct parts based
+on the rig type so that attachments can be created reliably. This also
+prevents errors when iterating through attachments later.
 
-    This abstraction ensures that the combat system works seamlessly
-    across both rig types without duplicating logic elsewhere.
+6.2 createAttachments – Creates attachments in the hands based on
+the rig type. First, it cleans up any existing attachments for that
+player to avoid memory leaks when a character respawns or dies. Then,
+it stores attachments in a table keyed by character for easy access.
+Attachments are positioned relative to the hands and serve as temporary
+raycast origins for hit detection. This allows the system to check hit
+positions accurately and consistently for each combo.
 ]]
 local function findRigType(character, humanoid:Humanoid)
 	local rightPart, leftPart
 	if humanoid.RigType == Enum.HumanoidRigType.R6 then
-		leftPart = character:WaitForChild("LeftArm")
-		rightPart = character:WaitForChild("RightArm")
+		leftPart = character:FindFirstChild("LeftArm")
+		rightPart = character:FindFirstChild("RightArm")
 	elseif humanoid.RigType == Enum.HumanoidRigType.R15 then
-		leftPart = character:WaitForChild("LeftHand")
-		rightPart = character:WaitForChild("RightHand")
+		leftPart = character:FindFirstChild("LeftHand")
+		rightPart = character:FindFirstChild("RightHand")
 	end
 	return leftPart, rightPart
 end
---[[ 15. CreateAttachments : Loop
-    Creates and assigns hit-detection attachments for each combo.
-
-    This function generates a set of attachments for every combo defined
-    in ComboSettings and parents them to the character’s left and right
-    hand (or arm) parts. The number of attachments created is determined
-    by the combo’s AttachmentCount setting.
-
-    These attachments act as dynamic raycast origins during combat,
-    allowing hit detection to follow animated limb movement rather than
-    relying on static hitboxes. All attachments are stored in the
-    ComboAttachments table for fast access during processing.
-]]
 local function createAttachments(character, leftPart, rightPart)
+	if ComboAttachments[character] then
+		for _, combo in pairs(ComboAttachments[character]) do
+			for _, hand in pairs(combo) do
+				for _, attach in ipairs(hand) do
+					if attach and attach.Parent then
+						attach:Destroy()
+					end
+				end
+			end
+		end
+	end
+
 	ComboAttachments[character] = {} 
 	for comboName, comboData in pairs(ComboSettings) do 
 		ComboAttachments[character][comboName] = { Left = {}, Right = {} } 
+
+		local leftSize = leftPart.Size
+		local rightSize = rightPart.Size
+
 		for i = 1, comboData.AttachmentCount do 
+			local factor = (i / (comboData.AttachmentCount + 1)) - 0.5
+
 			local left = Instance.new("Attachment", leftPart)
-			left.Position = Vector3.new(-0.13, 0, 0.03)
+			left.Position = Vector3.new(leftSize.X * factor, 0, leftSize.Z * 0.1)
 			table.insert(ComboAttachments[character][comboName].Left, left)
 
 			local right = Instance.new("Attachment", rightPart)
-			right.Position = Vector3.new(0.13, 0, 0.03)
+			right.Position = Vector3.new(rightSize.X * factor, 0, rightSize.Z * 0.1)
 			table.insert(ComboAttachments[character][comboName].Right, right)
 		end
 	end
 end
---[[ 16. Heartbeat : Loop
-    The main processing loop for all active combo notes.
-
-    This function runs every frame and is responsible for validating
-    and processing each active combo note. Without this loop, none of
-    the combat logic would execute.
-
-    For each active note, the system checks validity and runs hit
-    detection through RegisterHit using the note’s attachments.
-    
-    A secondary loop is used to clean up notes that have been marked
-    as processed, ensuring expired combos are removed and duplicate
-    hits cannot occur.
+--[[ 7. Heartbeat Loop
+This is the main loop for processing hit requests. Notes can arrive at any
+time, so the system needs to constantly check for new notes and process
+them. The loop also removes notes that have already been processed or
+expired. Running this per frame ensures hit detection is accurate and
+timely. Delays in registering or deleting notes could cause delayed hits
+or accidental repeated hits, which would break the feel of the combat.
 ]]
 RunService.Heartbeat:Connect(function()
-	for _, note in ipairs(activeCombos) do
-		processComboNote(note)
-	end
 	for i = #activeCombos, 1, -1 do
-		removeNoteFromTable(i) 
+		local note = activeCombos[i]
+		processActiveNote(note)
+		if note.Processed then
+			table.remove(activeCombos, i)
+			continue
+		end
 	end
 end)
---[[ 17. PlayerAdded : Event
-    Handles character setup when a player joins the game.
+--[[ 8. Player Setup
+When a player joins, we need to prepare the combat system for them.
+The pool system is checked and created only once to avoid repeated
+spikes and ensure all combos have preloaded VFX and sounds.
 
-    When a player is added, three main setup steps are performed:
-    1. Uses FindRigType to determine the correct left and right
-       arm/hand parts based on the character’s rig (R6 or R15).
-    2. Creates attachments on the character’s limbs, which are later
-       used to perform raycasts for accurate melee hit detection.
-    3. Expands the global object pools to account for the new player.
-       More players means more concurrent VFX and sounds may be
-       required during combat.
+We then wait for the player’s character to spawn. Using the humanoid,
+we determine the rig type (R6 or R15) so we know which hand parts to
+attach raycast points to. This allows the combat system to work for
+different rig types without hardcoding part names.
+
+Finally, we create attachments on the hands. These attachments act as
+tracking points for hit detection, stored in ComboAttachments for
+fast access and easy cleanup later. This setup ensures hits are
+accurately registered and avoids iterating over the character every frame.
 ]]
 Players.PlayerAdded:Connect(function(player) 
+	if not poolsCreated then
+		createPools()
+		poolsCreated = true
+	end
 	player.CharacterAdded:Connect(function(char)
-		if not char then
-			return
-		end
-		local humanoid = char:WaitForChild("Humanoid")
-		if not humanoid then
-			return
-		end
-		local leftPart, rightPart = findRigType(char,humanoid)
+		if not char then return end
+
+		local humanoid = char:FindFirstChild("Humanoid")
+		if not humanoid then return end
+
+		local leftPart, rightPart = findRigType(char, humanoid)
 		if not leftPart or not rightPart then
-			return print("Problem in fetching BodyParts")
-		else
-			createAttachments(char, leftPart, rightPart)
+			return warn("Problem in fetching BodyParts")
 		end
-		task.spawn(createPoolItemOnPlayerAdded)
+
+		createAttachments(char, leftPart, rightPart)
 	end)
 end)
---[[ 18. PlayerRemoving : Event
-    Cleans up character-related data when a player leaves the game.
+--[[ 9. Player Cleanup
+When a player leaves, we need to clean up everything associated with them.
+Their attachments in ComboAttachments are cleared to avoid memory leaks
+and dangling references. Active hit requests from that player are removed
+from activeCombos as a safety check so no hits are processed for a
+player who isn’t in the game.
 
-    This function is called when a player is removed from the server.
-    It clears the attachment data stored for the player’s character
-    from the ComboAttachments table. This ensures that no unnecessary
-    tables or references remain in memory once the character is gone,
-    preventing memory leaks and stale data from being accessed later.
+The pool system is also adjusted. Since fewer players are present, the
+demand for VFX and sound decreases, so we call decreasePoolSize to
+remove unused instances and save memory. This ensures the system stays
+efficient and prevents unnecessary growth of the pool over time.
 ]]
 Players.PlayerRemoving:Connect(function(player) 
 	local char = player.Character
 	if char then
 		ComboAttachments[char] = nil 
 	end
+	for i = #activeCombos, 1, -1 do
+		if activeCombos[i].Player == player then
+			table.remove(activeCombos, i)
+		end
+		
+	end
+	decreasePoolSize()
 end)
---[[ 19. CatchHitRequests : RemoteEvent
-    Handles hit requests sent from the client.
+--[[ 10. Hit Request
+This is where hit requests are received from the client and converted
+into notes for processing. Each note represents a single hit and
+stores all necessary data like the player, target, combo type, and
+raycast info.
 
-    In the LocalScript, when the player presses MouseButton1, the current
-    combo index is calculated and sent to the server using this RemoteEvent.
-    The server receives both the player and the combo name being used.
-
-    Before creating a hit note, the server validates that the player,
-    character, and combo still exist. This prevents invalid or malicious
-    requests from creating unwanted notes.
-
-    Once validated, AddHitRequest is called to convert the hit into a
-    temporary note containing all required combat data. This note is then
-    inserted into the ActiveCombos table for server-side processing.
-
-    A brief push effect is also applied to the attacking player to enhance
-    feedback and make hits feel more impactful and responsive.
+After the note is created, a small forward push is applied to the
+attacking player using applyVelocity. This adds a subtle step-
+forward effect, making the combat feel more responsive and realistic.
 ]]
 catchHitRequests.OnServerEvent:Connect(function(player, combo:string) 
-	if not combo then
-		return
-	end 
-	if not player then
-		return
-	end 
+	if not combo then return end
+	if not player then return end
 	local char = player.Character
-	if not char then
-		return
-	end
+	if not char then return end
 	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then
-		return
-	end
-	addHitRequest(player,char,combo)
-	local bodyVelocity = applyVelocity(char, combo)
-	Debris:AddItem(bodyVelocity, 0.1)
-end)
+	if not hum or hum.Health <= 0 then return end
 
+	addHitRequest(player, char, combo)
+	applyVelocity(char, combo)
+end)
