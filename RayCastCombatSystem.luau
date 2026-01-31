@@ -267,6 +267,7 @@ local function addKnockback(humanoid:Humanoid, character, combo:string, player)
 	if not anim then
 		return
 	end
+	cacheTracks[humanoid] = cacheTracks[humanoid] or {}
 	local track = cacheTracks[humanoid][combo]
 	if not track then
 		track = animator:LoadAnimation(anim)
